@@ -252,7 +252,7 @@ def log_validation(
         f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
         f" {args.validation_prompt}."
     )
-    pipeline = pipeline.to(accelerator.device)
+    pipeline.enable_model_cpu_offload()
     pipeline.set_progress_bar_config(disable=True)
 
     # run inference
@@ -839,7 +839,6 @@ def parse_args(input_args=None):
 
     return args
 
-
 def _encode_prompt_with_t5(
     text_encoder,
     tokenizer,
@@ -852,35 +851,12 @@ def _encode_prompt_with_t5(
     prompt = [prompt] if isinstance(prompt, str) else prompt
     batch_size = len(prompt)
 
-    if tokenizer is not None:
-        text_inputs = tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=max_sequence_length,
-            truncation=True,
-            add_special_tokens=True,
-            return_tensors="pt",
-        )
-        text_input_ids = text_inputs.input_ids
-    else:
-        if text_input_ids is None:
-            raise ValueError(
-                "text_input_ids must be provided when the tokenizer is not specified"
-            )
-
-    prompt_embeds = text_encoder(text_input_ids.to(device))[0]
-
-    dtype = text_encoder.dtype
-    prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
-
-    _, seq_len, _ = prompt_embeds.shape
-
-    # duplicate text embeddings and attention mask for each generation per prompt, using mps friendly method
-    prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-    prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
-
+    prompt_embeds = torch.zeros(
+        (batch_size * num_images_per_prompt, max_sequence_length, 4096),
+        device=device,
+        dtype=torch.float16
+    )
     return prompt_embeds
-
 
 def _encode_prompt_with_clip(
     text_encoder,
@@ -950,8 +926,8 @@ def encode_prompt(
             num_images_per_prompt=num_images_per_prompt,
             text_input_ids=text_input_ids_list[i] if text_input_ids_list else None,
         )
-        clip_prompt_embeds_list.append(prompt_embeds)
-        clip_pooled_prompt_embeds_list.append(pooled_prompt_embeds)
+        clip_prompt_embeds_list.append(prompt_embeds.to("cuda"))
+        clip_pooled_prompt_embeds_list.append(pooled_prompt_embeds.to("cuda"))
 
     clip_prompt_embeds = torch.cat(clip_prompt_embeds_list, dim=-1)
     pooled_prompt_embeds = torch.cat(clip_pooled_prompt_embeds_list, dim=-1)
@@ -963,14 +939,14 @@ def encode_prompt(
         prompt=prompt,
         num_images_per_prompt=num_images_per_prompt,
         text_input_ids=text_input_ids_list[-1] if text_input_ids_list else None,
-        device=device if device is not None else text_encoders[-1].device,
+        device="cuda",
     )
 
     clip_prompt_embeds = torch.nn.functional.pad(
         clip_prompt_embeds,
         (0, t5_prompt_embed.shape[-1] - clip_prompt_embeds.shape[-1]),
     )
-    prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embed], dim=-2)
+    prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embed.to("cuda")], dim=-2)
 
     return prompt_embeds, pooled_prompt_embeds
 
@@ -1062,7 +1038,7 @@ def main(args):
     ##############
     pipe = StableDiffusion3Pipeline.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers",
-        torch_dtype=torch.float32,  # https://discuss.huggingface.co/t/attempting-to-unscale-fp16-gradients/91253/2
+        torch_dtype=torch.float16,  # https://discuss.huggingface.co/t/attempting-to-unscale-fp16-gradients/91253/2
     )
 
     transformer = pipe.transformer
@@ -1084,9 +1060,9 @@ def main(args):
 
     vae.to(accelerator.device, dtype=torch.float32)
     transformer.to(accelerator.device, dtype=weight_dtype)
-    text_encoder_one.to(accelerator.device, dtype=weight_dtype)
-    text_encoder_two.to(accelerator.device, dtype=weight_dtype)
-    text_encoder_three.to(accelerator.device, dtype=weight_dtype)
+    #text_encoder_one.to(accelerator.device, dtype=weight_dtype)
+    #text_encoder_two.to(accelerator.device, dtype=weight_dtype)
+    #text_encoder_three.to(accelerator.device, dtype=weight_dtype)
 
     if args.gradient_checkpointing:
         transformer.enable_gradient_checkpointing()
@@ -1132,7 +1108,7 @@ def main(args):
 
             scheduler_args["variance_type"] = variance_type
 
-        pipeline = pipeline.to(accelerator.device)
+        pipeline.enable_model_cpu_offload()
         pipeline.set_progress_bar_config(disable=True)
 
         # run inference (validation prompt)
@@ -1494,25 +1470,25 @@ def main(args):
             sigma = sigma.unsqueeze(-1)
         return sigma
 
-    if accelerator.is_main_process:
-        validation(
-            args,
-            transformer,
-            vae,
-            text_encoder_one,
-            text_encoder_two,
-            text_encoder_three,
-            prompts=[
-                args.target_prompt,
-                args.synonym_prompt,
-                args.prior_prompt,
-            ],
-            titles=[
-                "validation-lora_on",
-                "synonym-lora_on",
-                "prior-lora_on",
-            ],
-        )
+    # if accelerator.is_main_process:
+    #     validation(
+    #         args,
+    #         transformer,
+    #         vae,
+    #         text_encoder_one,
+    #         text_encoder_two,
+    #         text_encoder_three,
+    #         prompts=[
+    #             args.target_prompt,
+    #             args.synonym_prompt,
+    #             args.prior_prompt,
+    #         ],
+    #         titles=[
+    #             "validation-lora_on",
+    #             "synonym-lora_on",
+    #             "prior-lora_on",
+    #         ],
+    #     )
 
     for epoch in range(first_epoch, args.num_train_epochs):
         transformer.train()
@@ -1791,7 +1767,7 @@ def main(args):
             args.pretrained_model_name_or_path,
             revision=args.revision,
             variant=args.variant,
-            torch_dtype=torch.float32,
+            torch_dtype=torch.float16,
         )
         # load attention processors
         pipeline.load_lora_weights(args.output_dir)

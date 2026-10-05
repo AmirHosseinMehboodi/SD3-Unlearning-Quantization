@@ -2,7 +2,7 @@ wandb
 transformers
 peft
 einops
-accelerator
+accelerate
 datasets
 sentencepiece
 lpips
@@ -10,4 +10,3 @@ openai
 diffusers
 tqdm
 apex
-git+https://github.com/notAI-tech/NudeNet.git

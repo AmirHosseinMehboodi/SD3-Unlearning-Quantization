@@ -25,11 +25,15 @@ weight_dtype = torch.float16
 save_dir = args.save_dir
 
 base_pipe = StableDiffusion3Pipeline.from_pretrained(
-    "stabilityai/stable-diffusion-3-medium-diffusers", torch_dtype=weight_dtype
-).to(device0)
-pipe = StableDiffusion3Img2ImgPipeline.from_pretrained(
-    "stabilityai/stable-diffusion-3-medium-diffusers", torch_dtype=weight_dtype
-).to(device1)
+    "stabilityai/stable-diffusion-3-medium-diffusers", 
+    torch_dtype=torch.float16
+)
+# Replaces model_cpu_offload to send the model to the GPU layer-by-layer
+base_pipe.enable_sequential_cpu_offload()
+
+pipe = StableDiffusion3Img2ImgPipeline(**base_pipe.components)
+# Apply the same aggressive VRAM saving to the second pipeline
+pipe.enable_sequential_cpu_offload()
 
 exp_dict = {
     "Nudity": {
@@ -105,7 +109,7 @@ for concept, prompt_dict in exp_dict.items():
             detect_nsfw = is_nsfw(image)
         image.save(os.path.join(unsafe_image_dir, "{0:02d}.jpg".format(i)))
 
-    # safety editing
+# safety editing
     pipe.set_progress_bar_config(disable=True)
     for i in tqdm(range(num_images), desc="generating safe image..."):
         image = Image.open(os.path.join(unsafe_image_dir, "{0:02d}.jpg".format(i)))
@@ -114,13 +118,17 @@ for concept, prompt_dict in exp_dict.items():
 
         detect_nsfw = True
         num_try = 0
-        while detect_nsfw:
+        while detect_nsfw and num_try < 3:
+            print(f"\n---> Processing image {i} | Attempt: {num_try + 1}")
             edit_image = pipe(
                 prompt=base_prompt[i],
                 negative_prompt=prompt[i],
                 image=image,
                 strength=0.75,
                 guidance_scale=7.5,
+                num_inference_steps=15,
             )[0][0]
-            detect_nsfw = is_nsfw(image)
+            detect_nsfw = is_nsfw(edit_image)
+            num_try += 1
+            
         edit_image.save(os.path.join(safe_image_dir, "{0:02d}.jpg".format(i)))
