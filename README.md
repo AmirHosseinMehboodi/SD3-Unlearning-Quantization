@@ -1,88 +1,48 @@
-# DUO: Direct Unlearning Optimization for Robust and Safe Text-to-Image Models
+# Direct Unlearning & Quantization Optimization for Stable Diffusion 3
 
-This repository contains the official implementation of [Direct Unlearning Optimization for Robust and Safe Text-to-Image Models](https://arxiv.org/abs/2407.21035).
+This repository explores the intersection of **Machine Unlearning** and **Post-Training Quantization (PTQ)** on large-scale text-to-image generative models, specifically focusing on `stabilityai/stable-diffusion-3-medium-diffusers`. 
 
+By applying Direct Preference Optimization (DPO) for unlearning unsafe concepts (e.g., nudity) and evaluating various quantization techniques, this project demonstrates how to maintain semantic integrity (CLIP score) while compressing model weights and preserving safety guardrails.
 
-**Our work is accepted at :tada:NeurIPS 2024:tada:!** This repository code is based on the settings used for the NeurIPS submission and differs from the configuration in the arXiv paper. The NeurIPS version of the paper will be uploaded to arXiv soon.
+## Key Contributions
+1. **Unlearning via DPO:** Fine-tuned SD3 using DPO (FP16 baseline) for 500 steps to suppress unsafe content generation.
+2. **Comprehensive Quantization:** Evaluated 4 distinct quantization strategies on the unlearned model to analyze the trade-off between compression, safety (Nudity Generation Rate), and visual fidelity.
+3. **Automated Evaluation Pipelines:** Integrated NudeNet for safety verification and CLIP-ViT for semantic alignment.
 
-## Setup
+## 📁 Repository Structure
+Based on the modular implementation, the repository is organized as follows:
+- `Quantization_BitsAndBytes/`: Scripts for evaluating LLM.int8 (8-bit) and NF4 (4-bit) quantization.
+- `Quantization_Dit/`: Implementations of PTQ4DiT (8-bit) and Q-DiT (4-bit dynamic group quantization).
+- `benchmarkClip/`: Pipelines for evaluating semantic retention using `openai/clip-vit-base-patch32`.
+- `evaluateLoraNGR/`: NudeNet evaluation scripts over 127 sensitive prompts.
+- `calibration/`: Scripts for prompt extraction and channel variance calibration.
 
-### Prerequisites
+## ⚙️ Experimental Setup
+All generated images across different quantization methods used the following fixed generation parameters:
+- **Inference Steps:** 20
+- **Guidance Scale:** 7.0
+- **Resolution:** 512x512
+- **Max Sequence Length:** 256
+- **Seed:** 42
 
-- Docker
-- NVIDIA GPU with CUDA support (4-GPU is recommended)
+### Quantization Configurations
+- **PTQ4DiT:** 8-bit Fake Quantization based on channel variance calibration.
+- **Q-DiT:** 4-bit Dynamic Group Quantization (`Group Size = 64`) to minimize transformer block degradation.
+- **LLM.int8 (BitsAndBytes):** Outlier-aware 8-bit quantization with `llm_int8_threshold=6.0` and `llm_int8_has_fp16_weight=False`.
+- **NF4 (BitsAndBytes):** Standard 4-bit NormalFloat quantization with native `torch.float16` compute precision to prevent model collapse.
 
-### Environment Setup
+## 📊 Quantitative Results
 
-1. Use the following Docker container image:
-   ```
-   nvcr.io/nvidia/pytorch:23.12-py3
-   ```
+The models were evaluated under two main criteria:
+1. **Nudity Generation Rate (NGR):** Measured via NudeNet across 127 sensitive prompts (Threshold > 0.45 for 5 explicit classes). Lower is better.
+2. **CLIP Score:** Measured using `openai/clip-vit-base-patch32` across 100 clean prompts to ensure semantic fidelity. Higher is better.
 
-2. After setting up the Docker container, run:
-   ```bash
-   git clone https://github.com/naver-ai/DUO
-   cd duo 
-   pip install -r requirements.txt
-   accelerate config
-   ```
+| Model     | Quantization Method     | Precision   | NudeNet Positive / 127 | Nudity Gen Rate ↓ | Mean CLIP ↑ |
+| :-------- | :---------------------- | :---------- | :--------------------: | :---------------: | :---------: |
+| Unlearned | None (Baseline)         | Full (FP16) |         26/127         |      20.47%       |    29.40    |
+| Unlearned | PTQ4DiT                 | INT8        |         11/127         |       8.66%       |    29.28    |
+| Unlearned | Q-DiT                   | INT4        |         6/127          |       4.72%       |    29.17    |
+| Unlearned | LLM.int8 (BitsAndBytes) | INT8        |         21/127         |      16.54%       |      -      |
+| Unlearned | NF4 (BitsAndBytes)      | INT4        |         12/127         |       9.45%       |      -      |
 
-## Training
-
-### Dataset preparation
-```bash
-bash scripts/prepare-dataset.sh
-```
-
-### Stable Diffusion 1.4v
-#### Nudity Experiment
-```bash
-bash scripts/sd-nudity.sh
-```
-
-#### Violence Experiment
-```bash
-bash scripts/sd-violence.sh
-```
-
-- We use `train_batch_size=4`. If the number of GPUs is not equal to 4, please adjust the batch size accordingly.
-- Specify the `save_dir` in all scripts. This is where the unlearned LoRA weights and evaluation results will be stored.
-- For the violence experiment, provide an OpenAI API key (refer to `scripts/sd-violence-figures.sh`).
-
-### Stable Diffusion 3
-
-```bash
-bash scripts/sd3-nudity.sh
-```
-
-## Inference
-We provide simple inference codes in `inference.py`.
-```bash
-python3 inference.py --prompt "a naked woman, realistic photo" --exp_type "nudity" --unlearn_model_path "train/outputs/unlearn/SD-train/dpo/500"
-python3 inference.py --prompt "a man bleeding" --exp_type "violence" --unlearn_model_path "train/outputs/unlearn/SD-train/dpo/1000"
-```
-
-## Acknowledgements
-
-This repository is heavily based on the following projects:
-- [Diffusers](https://github.com/huggingface/diffusers)
-- [DCO](https://github.com/kyungmnlee/dco)
-- [LoRA](https://github.com/cloneofsimo/lora/tree/master)
-
-## License
-```
-DUO
-Copyright (c) 2024-present NAVER Cloud Corp.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```
+*Note: Interestingly, Q-DiT (INT4) provided the strongest safety guardrails (lowest NGR) with minimal CLIP degradation.*
